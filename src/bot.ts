@@ -6,7 +6,7 @@ import * as dotenv from "dotenv";
 
 dotenv.config();
 
-// --- 1. CONFIGURATION ---
+// --- 1. CONFIGURATION & ERROR CHECKING ---
 const supabase = createClient(
   process.env.SUPABASE_URL || "",
   process.env.SUPABASE_SERVICE_ROLE_KEY || ""
@@ -15,6 +15,9 @@ const supabase = createClient(
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 const bot = new Bot(process.env.BOT_TOKEN || "");
+
+// Check if variables exist (Helps debug Railway crashes)
+if (!process.env.BOT_TOKEN) console.error("❌ ERROR: BOT_TOKEN is missing!");
 
 // --- 2. COMMANDS ---
 
@@ -32,11 +35,12 @@ bot.command("start", (ctx) => {
 });
 
 bot.command("total", async (ctx) => {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("expenses")
     .select("amount, currency")
     .eq("user_id", ctx.from?.id);
-  if (!data || data.length === 0) return ctx.reply("💰 No expenses found.");
+  if (error || !data || data.length === 0)
+    return ctx.reply("💰 No expenses found.");
 
   const totals = data.reduce((acc: any, curr) => {
     const sym = curr.currency || "£";
@@ -148,7 +152,12 @@ bot.on("message:photo", async (ctx) => {
         },
       },
     ]);
-    const ai = JSON.parse(result.response.text().match(/\{.*\}/s)![0]);
+
+    // Hardened JSON Parser
+    const text = result.response.text();
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("Invalid Vision JSON");
+    const ai = JSON.parse(jsonMatch[0]);
 
     await supabase.from("expenses").insert([{ ...ai, user_id: ctx.from?.id }]);
     await bot.api.deleteMessage(ctx.chat.id, wait.message_id);
@@ -156,7 +165,8 @@ bot.on("message:photo", async (ctx) => {
       `✅ **Saved!**\n${ai.item}: ${ai.currency}${ai.amount.toFixed(2)}`
     );
   } catch (e) {
-    ctx.reply("❌ Vision Error.");
+    console.error("Vision Error:", e);
+    ctx.reply("❌ Vision Error. Check logs.");
   }
 });
 
@@ -165,11 +175,14 @@ bot.on("message:text", async (ctx) => {
   if (ctx.message.text.startsWith("/")) return;
   const wait = await ctx.reply("🤖 *Thinking...*", { parse_mode: "Markdown" });
   try {
-    const prompt = `Extract expenses. Return ONLY JSON array: [{"item": "string", "amount": number, "currency": "string"}]`;
-    const result = await model.generateContent(
-      prompt + ` from: "${ctx.message.text}"`
-    );
-    const expenses = JSON.parse(result.response.text().match(/\[.*\]/s)![0]);
+    const prompt = `Extract expenses. Return ONLY JSON array: [{"item": "string", "amount": number, "currency": "string"}] from: "${ctx.message.text}"`;
+    const result = await model.generateContent(prompt);
+
+    // Hardened JSON Parser
+    const text = result.response.text();
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error("Invalid Text JSON");
+    const expenses = JSON.parse(jsonMatch[0]);
 
     await supabase
       .from("expenses")
@@ -181,7 +194,9 @@ bot.on("message:text", async (ctx) => {
         .join("\n")}`
     );
   } catch (e) {
-    ctx.reply("❌ Parsing Error.");
+    console.error("Parsing Error:", e);
+    await bot.api.deleteMessage(ctx.chat.id, wait.message_id);
+    ctx.reply("❌ Parsing Error. Try 'Pizza 12'.");
   }
 });
 
@@ -195,4 +210,6 @@ bot.api.setMyCommands([
 ]);
 
 console.log("🚀 FinGard Bot LIVE!");
-bot.start();
+bot.start().catch((err) => {
+  console.error("CRITICAL BOT ERROR:", err);
+});

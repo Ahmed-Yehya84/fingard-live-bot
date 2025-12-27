@@ -5,7 +5,7 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "tsx src/bot.ts"
+    "start": "npx tsx src/bot.ts"
   },
   "keywords": [],
   "author": "",
